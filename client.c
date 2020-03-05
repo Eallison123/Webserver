@@ -8,26 +8,12 @@
 /* Network */
 #include <netdb.h>
 #include <sys/socket.h>
-
+#include <pthread.h>
 #define BUF_SIZE 250
-typedef struct {
-    int job_id;
-	int job_fd; // the socket file descriptor
-    // what other stuff needs to be here eventually?
-} job_t;
-
-typedef struct {
-    job_t * jobs; // array of server Jobs on heap
-    size_t buf_capacity;
-    size_t head; // position of writer
-    size_t tail; // position of reader
-	  size_t capacity;
-    pthread_mutex_t work_mutex;
-    pthread_cond_t c_cond; // P/C condition variables
-    pthread_cond_t p_cond;
-} tpool_t;
-static tpool_t pool;
-static tpool_t *the_pool = &pool;
+volatile int cfd;
+char *path;
+char *schedalg;
+pthread_barrier_t barrier;
 
 // Get host information (used to establishConnection)
 struct addrinfo *getHostInfo(char* host, char* port) {
@@ -73,10 +59,34 @@ int establishConnection(struct addrinfo *info) {
 }
 
 // Send GET request
-void GET(int clientfd, char *path) {
+void GET(int clientfd, char *path) { 
+  // pthread_barrier_wait(&barrier);
   char req[1000] = {0};
   sprintf(req, "GET %s HTTP/1.0\r\n\r\n", path);
-  send(clientfd, req, strlen(req), 0);
+  send(cfd, req, strlen(req), 0);
+  
+}
+
+void tpool_init(size_t num_threads, void *(*start_routine) (void *), int clientfd, char* file)
+{
+    pthread_t  thread;
+    size_t     i;
+    cfd = clientfd;
+    path = file;
+    for (i=0; i<num_threads; i++) {
+        pthread_create(&thread, NULL, *start_routine, (void *) (i + 1));
+        pthread_detach(thread); // make non-joinable
+    }
+}
+static void *worker(void* arg){
+  if (!strncmp(schedalg, "FIFO", 4)){
+    return NULL;
+  } 
+  else
+    while(1){
+      GET(cfd, path);
+    }
+  return NULL;
 }
 
 //MAIN
@@ -97,9 +107,14 @@ int main(int argc, char **argv) {
             argv[1], argv[2], argv[3]);
     return 3;
   }
-  //make t pool, add
   // Send GET request > stdout
-  GET(clientfd, argv[3]);
+  
+  int numThreads = atoi(argv[3]);
+  char *file = argv[5];
+  schedalg = argv[4];
+  //also add for possible second file 
+  pthread_barrier_init(&barrier, NULL, numThreads);
+  tpool_init(numThreads, worker, clientfd, file);
   while (recv(clientfd, buf, BUF_SIZE, 0) > 0) {
     fputs(buf, stdout);
     memset(buf, 0, BUF_SIZE);
