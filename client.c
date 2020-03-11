@@ -9,6 +9,7 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <pthread.h>
+#include <semaphore.h>
 #define BUF_SIZE 250
 #define HOST "localhost"
 volatile int cfd;
@@ -19,8 +20,11 @@ char *port;
 pthread_cond_t cond;
 pthread_mutex_t mutex;
 pthread_barrier_t barrier;
+sem_t* semaphores;
+int nThreads;
+//function to assist in debugging
 void print(int x){
-  printf("%d", x);
+  printf("\n%d\n", x);
   fflush(stdout);
 }
 // Get host information (used to establishConnection)
@@ -80,39 +84,49 @@ void tpool_init(size_t num_threads, void *(*start_routine) (void *), int clientf
     cfd = clientfd;
     path = file;
     pthread_cond_init(&cond, NULL);
-    pthread_mutex_init(&mutex, NULL);
-    pthread_mutex_lock(&mutex);
+    pthread_mutex_init(&mutex, NULL);  
+    semaphores = calloc (num_threads * sizeof(semaphores), 1);
+    nThreads = num_threads;
     for (i=0; i<num_threads; i++) {
-        pthread_create(&thread, NULL, *start_routine, (void *) (i + 1));
-        if(!strncmp(schedalg, "FIFO", 4)){
-          pthread_cond_wait(&cond, &mutex);
-        }
+        pthread_create(&thread, NULL, *start_routine, (void *) (i));
+        sem_init(&semaphores[i], 0, 1);
+        if(i != 0)
+          sem_wait(&semaphores[i]);
         pthread_detach(thread); // make non-joinable
-        pthread_cond_signal(&cond);
     }
+
 }
 static void *worker(void* arg){
   char buf[BUF_SIZE];
+  int clientfd;
   /* 
   *when it's a FIFO schedule, it will wake up a thread, send a GET
   *request, then signal to another sleeping thread, and then wait 
   *to be signalled again as it gets put on wait
   */
+
   if (!strncmp(schedalg, "FIFO", 4)){
     while(1){
-      int clientfd = establishConnection(getHostInfo(host, port));
+      print(0);
+      pthread_mutex_lock(&mutex);//lock for wait
+      print(1);
+      
+      pthread_cond_wait(&cond, &mutex);
+      //coutnerForThreads--;
+      pthread_mutex_unlock(&mutex);//make sure no lock issues
+      clientfd = establishConnection(getHostInfo(host, port));
       if (clientfd == -1) {
         fprintf(stderr, "[main:73] Failed to connect to: %s:%s \n", host, port); //removed it from printing argv[3]
         return NULL;
       }
       GET(clientfd, path);
+      sem_post(&semaphores[(int) arg + 1] % );      
       while (recv(clientfd, buf, BUF_SIZE, 0) > 0) {
         fputs(buf, stdout);
         memset(buf, 0, BUF_SIZE);
       }
       close(clientfd);
-      pthread_cond_signal(&cond);
-      pthread_cond_wait(&cond, &mutex);
+      sem_wait(&semaphores[(int) arg]);
     }
   }  
   /*
@@ -122,7 +136,7 @@ static void *worker(void* arg){
   */
   else
     while(1){
-      int clientfd = establishConnection(getHostInfo(host, port));
+      clientfd = establishConnection(getHostInfo(host, port));
       if (clientfd == -1) {
         fprintf(stderr, "[main:73] Failed to connect to: %s:%s \n", host, port);
         return NULL;
@@ -150,7 +164,6 @@ int main(int argc, char **argv) {
   }
 
   // Establish connection with <hostname>:<port>
-  print(1);
   clientfd = establishConnection(getHostInfo(argv[1], argv[2]));
   if (clientfd == -1) {
     fprintf(stderr,
@@ -158,7 +171,6 @@ int main(int argc, char **argv) {
             argv[1], argv[2], argv[3]);
     return 3;
   }
-  print(2);
   // Send GET request > stdout
   port = argv[2];
   host = argv[1];
