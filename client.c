@@ -17,16 +17,13 @@ char* host;
 char *path;
 char *schedalg;
 char *port;
+char* file2;
 pthread_cond_t cond;
 pthread_mutex_t mutex;
 pthread_barrier_t barrier;
 sem_t* semaphores;
 int nThreads;
 //function to assist in debugging
-void print(int x){
-  printf("\n%d\n", x);
-  fflush(stdout);
-}
 // Get host information (used to establishConnection)
 struct addrinfo *getHostInfo(char* host, char* port) {
   int r;
@@ -89,12 +86,10 @@ void tpool_init(size_t num_threads, void *(*start_routine) (void *), int clientf
     nThreads = num_threads;
     for (i=0; i<num_threads; i++) {
         pthread_create(&thread, NULL, *start_routine, (void *) (i));
-        sem_init(&semaphores[i], 0, 1);
-        if(i != 0)
-          sem_wait(&semaphores[i]);
+        sem_init(&semaphores[i], 0, 0);
         pthread_detach(thread); // make non-joinable
     }
-
+  sem_post(&semaphores[0]);
 }
 static void *worker(void* arg){
   char buf[BUF_SIZE];
@@ -104,29 +99,34 @@ static void *worker(void* arg){
   *request, then signal to another sleeping thread, and then wait 
   *to be signalled again as it gets put on wait
   */
-
+  int x = *(int*)&arg;
+  volatile int which_file = 1; //will be 1 for file 1, 2 for file 2 going back and forth
   if (!strncmp(schedalg, "FIFO", 4)){
     while(1){
-      print(0);
-      pthread_mutex_lock(&mutex);//lock for wait
-      print(1);
-      
-      pthread_cond_wait(&cond, &mutex);
-      //coutnerForThreads--;
+      sem_wait(&semaphores[x]);
       pthread_mutex_unlock(&mutex);//make sure no lock issues
       clientfd = establishConnection(getHostInfo(host, port));
       if (clientfd == -1) {
         fprintf(stderr, "[main:73] Failed to connect to: %s:%s \n", host, port); //removed it from printing argv[3]
         return NULL;
       }
-      GET(clientfd, path);
-      sem_post(&semaphores[(int) arg + 1] % );      
+      if (file2 != NULL && which_file == 1){
+        GET(clientfd, path);
+        which_file++;
+      }
+      else
+      {
+        GET(clientfd, file2);
+        which_file--;
+      }
+      
+      sem_post(&semaphores[(x + 1) % nThreads] );      
       while (recv(clientfd, buf, BUF_SIZE, 0) > 0) {
         fputs(buf, stdout);
         memset(buf, 0, BUF_SIZE);
       }
       close(clientfd);
-      sem_wait(&semaphores[(int) arg]);
+      
     }
   }  
   /*
@@ -148,7 +148,6 @@ static void *worker(void* arg){
         memset(buf, 0, BUF_SIZE);
       }
       close(clientfd);
-      // pthread_barrier_wait(&barrier);
     }
   return NULL;
 }
@@ -156,7 +155,6 @@ static void *worker(void* arg){
 //MAIN
 int main(int argc, char **argv) {
   int clientfd;
-  // char buf[BUF_SIZE];
 
   if (argc != 7 && argc != 6) {
     fprintf(stderr, "USAGE: %s <hostname> <port> <threads> <schedalg> <filename1> <*opt*filename2> \n", argv[0]);
@@ -176,16 +174,12 @@ int main(int argc, char **argv) {
   host = argv[1];
   int numThreads = atoi(argv[3]);
   char *file = argv[5];
+  if (argc == 7)
+    file2 = argv[6];
   schedalg = argv[4];
-  //also add for possible second file 
   pthread_barrier_init(&barrier, NULL, numThreads);
   tpool_init(numThreads, worker, clientfd, file);
-  // GET(clientfd, file);
-  // while (recv(clientfd, buf, BUF_SIZE, 0) > 0) {
-  //   fputs(buf, stdout);
-  //   memset(buf, 0, BUF_SIZE);
-  // }
-  // close(clientfd);
-  while(1);
+  
+  while(1);//main thread runs in the background while other threads continue
   return 0;
 }
